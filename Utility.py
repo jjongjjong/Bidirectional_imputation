@@ -3,9 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pathlib
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence
 
 
-def train (model,dataloader,optim,loss_f,epoch,device,corr_value,norm_name=None):
+def train (model, dataloader, optim, loss_f, epoch, device, start_value, norm_name=None, complete_data_len=720, impute_max_len=50):
     model.train()
     recon_dict = {'minmax': min_max_recover, 'zero': zero_norm_recover, 'total_zero': zero_norm_recover}
     mapping = {'minmax': 'min_max', 'zero': 'mean_var', 'total_zero': 'total_mean_var'}
@@ -16,47 +17,49 @@ def train (model,dataloader,optim,loss_f,epoch,device,corr_value,norm_name=None)
 
     for i, (corr,raw,mask,norm,stat_dict,demo_dict) in enumerate(dataloader):
 
-        head_input,tail_input,label = input_split(norm,corr)
-        head_padded_input = padding_input(head_input,720,)
-        tail_padded_input =
-        padded_label =
+        input = norm if norm_name is not None else raw
 
-        if norm_name is not None:
-            norm_corr = norm.clone()
-            norm_corr[corr==-1]=corr_value
-            encode = model.encoder(norm_corr)
-            decode = model.decoder(encode)
-            output_recon = recon_dict[norm_name](decode,stat_dict[mapping[norm_name]].to(device))
-            #input_var = norm_corr.var(dim=1)
+        head_input, tail_input, label = input_split(input, corr)
+        head_length_list = torch.Tensor([len(each) for each in head_input]).to(device)
+        tail_length_list = torch.Tensor([len(each) for each in tail_input]).to(device)
+        label_length_list = torch.Tensor([len(each) for each in label]).to(device)
 
-        else :
-            encode = model.encoder(corr)
-            decode = model.decoder(encode)
-            output_recon = decode.copy()
-            #input_var = corr.var(dim=1)
+        head_padded = padding_input(head_input, complete_data_len, 0, device)
+        tail_padded = padding_input(tail_input, complete_data_len, 0, device)
+        label_padded = padding_input(label, impute_max_len, -1, device)
+        label_mask = torch.where(label_padded >= 0, label_padded, torch.zeros_like(label_padded))
 
-        origin = norm if norm_name is not None else raw
-        output_var = decode.var(dim=1)
-        #loss_var = torch.sqrt(torch.mean((output_var-input_var)**2))
-        # 어떤 모델을 사용하느냐에 따라 모델의 로스 구성을 다르게 진행하여야 함
+        head_ordered_lengths, head_perm_idx = head_length_list.sort(0, descending=True)
+        tail_ordered_lengths, tail_perm_idx = tail_length_list.sort(0, descending=True)
 
-        # origin[corr!=-1]=0
-        # decode[corr!=-1]=0
+        head_padded = head_padded[head_perm_idx]
+        tail_padded = tail_padded[tail_perm_idx]
+
+        head_packed = pack_padded_sequence(head_padded.reshape(-1, complete_data_len, 1), head_ordered_lengths, batch_first=True)
+        tail_packed = pack_padded_sequence(tail_padded.reshape(-1, complete_data_len, 1), tail_ordered_lengths, batch_first=True)
+
+        output = model(head_packed, tail_packed, head_perm_idx, tail_perm_idx, start_value)
+        output = output * label_mask
 
         optim.zero_grad()
-        loss = loss_f(decode, origin)#+loss_var
+        loss = loss_f(output, label_padded)#+loss_var
         loss.backward()
         optim.step()
         loss_list.append(loss.cpu().item())
 
+
+        output_recon = recon_function(output, label_length_list, head_input, tail_input, complete_data_len)
+        if norm_name is not None:
+            output_recon = recon_dict[norm_name](torch.from_numpy(output_recon), stat_dict[mapping[norm_name]].to(device))
+
         raw_list.extend(raw.cpu().detach().numpy())
         corr_list.extend(corr.cpu().detach().numpy())
-        output_list.extend(output_recon.cpu().detach().numpy())
+        output_list.extend(output_recon.numpy())
 
-    raw_list,corr_list,output_list = np.array(raw_list),np.array(corr_list),np.array(output_list)
-    RMSE_total,RMSE_point = RMSE_F(raw_list,corr_list,output_list)
-    MRE_total,MRE_point = MRE_F(raw_list,corr_list,output_list)
-    MAE_total,MAE_point = MAE_F(raw_list,corr_list,output_list)
+    raw_list,corr_list,output_recon = np.array(raw_list),np.array(corr_list),np.array(output_recon)
+    RMSE_total,RMSE_point = RMSE_F(raw_list,corr_list,output_recon)
+    MRE_total,MRE_point = MRE_F(raw_list,corr_list,output_recon)
+    MAE_total,MAE_point = MAE_F(raw_list,corr_list,output_recon)
 
     print('{} epoch loss : {}'.format(epoch,np.array(loss_list).mean()))
     print('(train)RMSE:{:.2f} MAE:{:.2f} MRE:{:.2f}'.format(RMSE_point,MAE_point,MRE_point))
@@ -64,8 +67,7 @@ def train (model,dataloader,optim,loss_f,epoch,device,corr_value,norm_name=None)
 
 
 
-
-def test (model,dataloader,device,corr_value,norm_name=None):
+def test (model, dataloader, device, start_value, norm_name=None, complete_data_len=720, impute_max_len=50):
     model.eval()
     recon_dict ={'minmax':min_max_recover,'zero':zero_norm_recover,'total_zero':zero_norm_recover}
     mapping = {'minmax':'min_max','zero':'mean_var','total_zero':'total_mean_var'}
@@ -75,32 +77,43 @@ def test (model,dataloader,device,corr_value,norm_name=None):
     output_list = []
 
     for i, (corr, raw, mask, norm, stat_dict, demo_dict) in enumerate(dataloader):
-        corr, raw, mask, norm = corr.to(device), raw.to(device), mask.to(device), norm.to(device)
 
+        input = norm if norm_name is not None else raw
 
+        head_input, tail_input, label = input_split(input, corr)
+        head_length_list = torch.Tensor([len(each) for each in head_input]).to(device)
+        tail_length_list = torch.Tensor([len(each) for each in tail_input]).to(device)
+        label_length_list = torch.Tensor([len(each) for each in label]).to(device)
+
+        head_padded = padding_input(head_input, complete_data_len, 0, device)
+        tail_padded = padding_input(tail_input, complete_data_len, 0, device)
+        label_padded = padding_input(label, impute_max_len, -1, device)
+        label_mask = torch.where(label_padded >= 0, label_padded, torch.zeros_like(label_padded))
+
+        head_ordered_lengths, head_perm_idx = head_length_list.sort(0, descending=True)
+        tail_ordered_lengths, tail_perm_idx = tail_length_list.sort(0, descending=True)
+
+        head_padded = head_padded[head_perm_idx]
+        tail_padded = tail_padded[tail_perm_idx]
+
+        head_packed = pack_padded_sequence(head_padded.reshape(-1, complete_data_len, 1), head_ordered_lengths, batch_first=True)
+        tail_packed = pack_padded_sequence(tail_padded.reshape(-1, complete_data_len, 1), tail_ordered_lengths, batch_first=True)
+
+        output = model(head_packed, tail_packed, head_perm_idx, tail_perm_idx, start_value)
+        output = output * label_mask
+
+        output_recon = recon_function(output, label_length_list, head_input, tail_input, complete_data_len)
         if norm_name is not None:
+            output_recon = recon_dict[norm_name](torch.from_numpy(output_recon), stat_dict[mapping[norm_name]].to(device))
 
-            norm_corr = norm.clone()
-            norm_corr[corr==-1]=corr_value
-            encode = model.encoder(norm_corr)
-            output = model.decoder(encode)
-            output = recon_dict[norm_name](output,stat_dict[mapping[norm_name]].to(device))
-            #input_var = norm_corr.var(dim=1)
-        else :
-            encode = model.encoder(corr)
-            output = model.decoder(encode)
-            #input_var = corr.var(dim=1)
-
-        raw_list.extend(raw.cpu().detach().numpy())
-        corr_list.extend(corr.cpu().detach().numpy())
-        output_list.extend(output.cpu().detach().numpy())
-
-    raw_list,corr_list,output_list = np.array(raw_list),np.array(corr_list),np.array(output_list)
-    RMSE_total,RMSE_point = RMSE_F(raw_list,corr_list,output_list)
-    MRE_total,MRE_point = MRE_F(raw_list,corr_list,output_list)
-    MAE_total,MAE_point = MAE_F(raw_list,corr_list,output_list)
+    raw_list,corr_list,output_recon = np.array(raw_list),np.array(corr_list),np.array(output_recon)
+    RMSE_total,RMSE_point = RMSE_F(raw_list,corr_list,output_recon)
+    MRE_total,MRE_point = MRE_F(raw_list,corr_list,output_recon)
+    MAE_total,MAE_point = MAE_F(raw_list,corr_list,output_recon)
 
     return {'RMSE':RMSE_total,'MRE':MRE_total,'MAE':MAE_total},{'RMSE':RMSE_point,'MRE':MRE_point,'MAE':MAE_point}
+
+
 
 
 def visualizing(dataloader,model,device,norm_name,batch_size,save_path,corr_value,mode):
@@ -160,6 +173,26 @@ def padding_input(input_list, max_len, fill_value, device):
     for idx, input_row in enumerate(input_list):
         dummy[idx, :len(input_row)] = input_row
     return dummy
+
+
+def recon_function(output,label_len_list,head_input,tail_input,row_len):
+    ''' imputation 부분과 head tail 부분을 합쳐서 리스트로 만들어 주는 함수
+    :param output the np.array result of imputaion containing padding
+    :param label_len_list
+    :return the numpy array of fulfiled row data
+    '''
+    output = output.cpu().detach().numpy().tolist()
+    label_len_list = label_len_list.cpu().numpy().tolist()
+
+    recon_list =[]
+    for i in range(len(output)):
+        recon = head_input[i].numpy().tolist()+output[i][:int(label_len_list[i])]+tail_input+tail_input[i].numpy().tolist()
+        assert len(recon)==row_len
+
+        recon_list.append(recon)
+
+    return np.array(recon_list)
+
 
 
 def info_writer(info,savepath):

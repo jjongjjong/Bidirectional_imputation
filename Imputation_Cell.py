@@ -1,5 +1,6 @@
 import torch
 
+
 class Imputation_Cell(torch.nn.ModuleList):
     def __init__(self, impute_len, input_size, hidden_size, dr_rate=0.3, output_size=1):
         super(Imputation_Cell, self).__init__()
@@ -25,7 +26,7 @@ class Imputation_Cell(torch.nn.ModuleList):
 
         x = torch.zeros(batch_size, 1)
         for t in range(self.impute_len):
-            h, c = self.LSTM_inpute(x, context)
+            h, c = self.LSTM_inpute(x.clone(), context)
             x = torch.clamp(self.fc_layer(h), min=0)
             context = (h, c)
             output_seq[:, t] = x.view(-1)

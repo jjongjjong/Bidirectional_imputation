@@ -1,7 +1,6 @@
 import torch
 from Imputation_Cell import Imputation_Cell
 
-
 class Bidirectional_imputation(torch.nn.ModuleList):
     def __init__(self, input_size, hidden_size, layer_size, output_size, impute_len, dr_rate, device):
         super(Bidirectional_imputation, self).__init__()
@@ -27,7 +26,8 @@ class Bidirectional_imputation(torch.nn.ModuleList):
         )
 
     def forward(self, input_forward, input_backward, forward_perm_idx, backward_perm_idx, start_value, batchsize):
-        # batchsize = input_forward.shape[0] forward_perm_idx,backward_perm_idx,
+
+        batchsize = len(forward_perm_idx)
 
         h0_forward = torch.zeros(self.layer_size, batchsize, self.hidden_size).to(self.device)
         c0_forward = torch.zeros(self.layer_size, batchsize, self.hidden_size).to(self.device)

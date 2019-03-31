@@ -52,7 +52,7 @@ model = Bidirectional_imputation().double().to(device)
 # model = model.to(device)
 
 optimizer = torch.optim.Adam(model.parameters(),lr = lr)
-loss_f = torch.nn.MSELoss()
+loss_f = torch.nn.MSELoss(redution='sum')
 
 best_MSE_score = 1000000000000000
 best_MAE_score = 1000000000000000
